@@ -1,0 +1,457 @@
+diff --git a/libavcodec/h264_mp4toannexb_bsf.c b/libavcodec/h264_mp4toannexb_bsf.c
+index 292d106..3a78150 100644
+--- a/libavcodec/h264_mp4toannexb_bsf.c
++++ b/libavcodec/h264_mp4toannexb_bsf.c
+@@ -253,7 +253,7 @@ static int h264_mp4toannexb_filter(AVBSFContext *ctx, AVPacket *out)
+                                         buf, nal_size, 1)) < 0)
+                 goto fail;
+         } else {
+-            if ((ret=alloc_and_copy(out, NULL, 0, buf, nal_size, unit_type == 7 || unit_type == 8)) < 0)
++            if ((ret=alloc_and_copy(out, NULL, 0, buf, nal_size, 1)) < 0)
+                 goto fail;
+             if (!s->new_idr && unit_type == 1) {
+                 s->new_idr = 1;
+diff --git a/libavcodec/rv34.c b/libavcodec/rv34.c
+index f1495fb..256b007 100644
+--- a/libavcodec/rv34.c
++++ b/libavcodec/rv34.c
+@@ -1654,7 +1654,6 @@ int ff_rv34_decode_frame(AVCodecContext *avctx,
+     int slice_count;
+     const uint8_t *slices_hdr = NULL;
+     int last = 0;
+-    int faulty_b = 0;
+     int offset;
+ 
+     /* no supplementary picture */
+@@ -1693,7 +1692,7 @@ int ff_rv34_decode_frame(AVCodecContext *avctx,
+         si.type == AV_PICTURE_TYPE_B) {
+         av_log(avctx, AV_LOG_ERROR, "Invalid decoder state: B-frame without "
+                "reference data.\n");
+-        faulty_b = 1;
++        return AVERROR_INVALIDDATA;
+     }
+     if(   (avctx->skip_frame >= AVDISCARD_NONREF && si.type==AV_PICTURE_TYPE_B)
+        || (avctx->skip_frame >= AVDISCARD_NONKEY && si.type!=AV_PICTURE_TYPE_I)
+@@ -1786,8 +1785,6 @@ int ff_rv34_decode_frame(AVCodecContext *avctx,
+                "multithreading mode (start MB is %d).\n", si.start);
+         return AVERROR_INVALIDDATA;
+     }
+-    if (faulty_b)
+-        return AVERROR_INVALIDDATA;
+ 
+     for(i = 0; i < slice_count; i++){
+         int offset  = get_slice_offset(avctx, slices_hdr, i  , slice_count, buf_size);
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index a2fe7c6..2c04875 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -805,6 +805,7 @@ typedef struct AVIndexEntry {
+     int flags:2;
+     int size:30; //Yeah, trying to keep the size of this small to reduce memory requirements (it is 24 vs. 32 bytes due to possible 8-byte alignment).
+     int min_distance;         /**< Minimum distance between this and the previous keyframe, used to avoid unneeded searching. */
++    int64_t pts;
+ } AVIndexEntry;
+ 
+ #define AV_DISPOSITION_DEFAULT   0x0001
+@@ -2797,6 +2798,9 @@ int av_codec_get_tag2(const struct AVCodecTag * const *tags, enum AVCodecID id,
+ 
+ int av_find_default_stream_index(AVFormatContext *s);
+ 
++int64_t av_search_closest_presentation_timestamp(const AVIndexEntry *entries, int nb_entries,
++                             int64_t wanted_timestamp, int want_pts);
++
+ /**
+  * Get the index for a specific timestamp.
+  *
+diff --git a/libavformat/id3v2.c b/libavformat/id3v2.c
+index f7de26a..56e911b 100644
+--- a/libavformat/id3v2.c
++++ b/libavformat/id3v2.c
+@@ -258,7 +258,7 @@ static int decode_str(AVFormatContext *s, AVIOContext *pb, int encoding,
+     case ID3v2_ENCODING_ISO8859:
+         while (left && ch) {
+             ch = avio_r8(pb);
+-            PUT_UTF8(ch, tmp, avio_w8(dynbuf, tmp);)
++            avio_w8(dynbuf, ch);
+             left--;
+         }
+         break;
+diff --git a/libavformat/isom.h b/libavformat/isom.h
+index 4da3414..9ade1c1 100644
+--- a/libavformat/isom.h
++++ b/libavformat/isom.h
+@@ -137,6 +137,11 @@ typedef struct MOVIndexRange {
+     int64_t end;
+ } MOVIndexRange;
+ 
++typedef struct Tx3g {
++    uint32_t datalen;
++    uint8_t *data;
++} Tx3g;
++
+ typedef struct MOVStreamContext {
+     AVIOContext *pb;
+     int pb_is_copied;
+@@ -225,6 +230,9 @@ typedef struct MOVStreamContext {
+         int64_t auxiliary_info_index;
+         struct AVAESCTR* aes_ctr;
+     } cenc;
++
++    Tx3g **tx3g_datas;
++    int32_t tx3g_count;
+ } MOVStreamContext;
+ 
+ typedef struct MOVContext {
+diff --git a/libavformat/matroskadec.c b/libavformat/matroskadec.c
+index 2faaf9d..35a38cb 100644
+--- a/libavformat/matroskadec.c
++++ b/libavformat/matroskadec.c
+@@ -448,7 +448,7 @@ static const EbmlSyntax matroska_track_video_projection[] = {
+ };
+ 
+ static const EbmlSyntax matroska_track_video[] = {
+-    { MATROSKA_ID_VIDEOFRAMERATE,      EBML_FLOAT, 0, offsetof(MatroskaTrackVideo, frame_rate) },
++//    { MATROSKA_ID_VIDEOFRAMERATE,      EBML_FLOAT, 0, offsetof(MatroskaTrackVideo, frame_rate) },
+     { MATROSKA_ID_VIDEODISPLAYWIDTH,   EBML_UINT,  0, offsetof(MatroskaTrackVideo, display_width), { .u=-1 } },
+     { MATROSKA_ID_VIDEODISPLAYHEIGHT,  EBML_UINT,  0, offsetof(MatroskaTrackVideo, display_height), { .u=-1 } },
+     { MATROSKA_ID_VIDEOPIXELWIDTH,     EBML_UINT,  0, offsetof(MatroskaTrackVideo, pixel_width) },
+@@ -532,7 +532,7 @@ static const EbmlSyntax matroska_track[] = {
+     { MATROSKA_ID_CODECPRIVATE,          EBML_BIN,   0, offsetof(MatroskaTrack, codec_priv) },
+     { MATROSKA_ID_CODECDELAY,            EBML_UINT,  0, offsetof(MatroskaTrack, codec_delay) },
+     { MATROSKA_ID_TRACKLANGUAGE,         EBML_UTF8,  0, offsetof(MatroskaTrack, language),     { .s = "eng" } },
+-    { MATROSKA_ID_TRACKDEFAULTDURATION,  EBML_UINT,  0, offsetof(MatroskaTrack, default_duration) },
++//    { MATROSKA_ID_TRACKDEFAULTDURATION,  EBML_UINT,  0, offsetof(MatroskaTrack, default_duration) },
+     { MATROSKA_ID_TRACKTIMECODESCALE,    EBML_FLOAT, 0, offsetof(MatroskaTrack, time_scale),   { .f = 1.0 } },
+     { MATROSKA_ID_TRACKFLAGDEFAULT,      EBML_UINT,  0, offsetof(MatroskaTrack, flag_default), { .u = 1 } },
+     { MATROSKA_ID_TRACKFLAGFORCED,       EBML_UINT,  0, offsetof(MatroskaTrack, flag_forced),  { .u = 0 } },
+diff --git a/libavformat/mov.c b/libavformat/mov.c
+index 3312678..67994e4 100644
+--- a/libavformat/mov.c
++++ b/libavformat/mov.c
+@@ -1265,7 +1265,7 @@ static int64_t get_frag_time(MOVFragmentIndex *frag_index,
+ static int search_frag_timestamp(MOVFragmentIndex *frag_index,
+                                  AVStream *st, int64_t timestamp)
+ {
+-    int a, b, m;
++    int a, b, m, m0;
+     int64_t frag_time;
+     int id = -1;
+ 
+@@ -1281,15 +1281,18 @@ static int search_frag_timestamp(MOVFragmentIndex *frag_index,
+     b = frag_index->nb_items;
+ 
+     while (b - a > 1) {
+-        m = (a + b) >> 1;
+-        frag_time = get_frag_time(frag_index, m, id);
+-        if (frag_time != AV_NOPTS_VALUE) {
+-            if (frag_time >= timestamp)
+-                b = m;
+-            if (frag_time <= timestamp)
+-                a = m;
+-        }
++        m0 = m = (a + b) >> 1;
++
++        while (m < b &&
++               (frag_time = get_frag_time(frag_index, m, id)) == AV_NOPTS_VALUE)
++            m++;
++
++        if (m < b && frag_time <= timestamp)
++            a = m;
++        else
++            b = m0;
+     }
++
+     return a;
+ }
+ 
+@@ -2458,6 +2461,33 @@ int ff_mov_read_stsd_entries(MOVContext *c, AVIOContext *pb, int entries)
+         int64_t size    = avio_rb32(pb); /* size */
+         uint32_t format = avio_rl32(pb); /* data format */
+ 
++        if (format == MKTAG('t', 'x', '3', 'g')) {
++            char key[32] = "", value[32] = "";
++            AVDictionary **metadata = &st->metadata;
++            int64_t pos = avio_tell(pb);
++            avio_seek(pb, start_pos, SEEK_SET);
++
++            Tx3g *tx3g_atom = av_malloc(sizeof(Tx3g));
++            if (!tx3g_atom)
++                return AVERROR(ENOMEM);
++
++            tx3g_atom->datalen = size;
++            tx3g_atom->data = av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE);
++            if (!tx3g_atom->data)
++                return AVERROR(ENOMEM);
++            avio_read(pb, tx3g_atom->data, size);
++
++            sc->tx3g_datas = (Tx3g **)av_realloc(sc->tx3g_datas, sizeof(Tx3g *) * (++sc->tx3g_count));
++            sc->tx3g_datas[sc->tx3g_count - 1] = tx3g_atom;
++
++            snprintf(value, sizeof(value), "%d", sc->tx3g_count);
++            av_dict_set(metadata, "tx3g_count", value, 0);
++            snprintf(value, sizeof(value), "%ld", sc->tx3g_datas);
++            av_dict_set(metadata, "tx3g_data", value, 0);
++
++            avio_seek(pb, pos, SEEK_SET);
++        }
++
+         if (size >= 16) {
+             avio_rb32(pb); /* reserved */
+             avio_rb16(pb); /* reserved */
+@@ -3842,6 +3872,11 @@ static void mov_build_index(MOVContext *mov, AVStream *st)
+                     e = &st->index_entries[st->nb_index_entries++];
+                     e->pos = current_offset;
+                     e->timestamp = current_dts;
++                    if (sc->ctts_data) {
++                        e->pts = current_dts + sc->ctts_data[current_sample].duration;
++                    } else {
++                        e->pts = current_dts;
++                    }
+                     e->size = sample_size;
+                     e->min_distance = distance;
+                     e->flags = keyframe ? AVINDEX_KEYFRAME : 0;
+@@ -4811,6 +4846,7 @@ static int mov_read_trun(MOVContext *c, AVIOContext *pb, MOVAtom atom)
+         st->index_entries[index_entry_pos].size= sample_size;
+         st->index_entries[index_entry_pos].min_distance= distance;
+         st->index_entries[index_entry_pos].flags = index_entry_flags;
++        st->index_entries[index_entry_pos].pts = dts + ctts_duration;
+ 
+         sc->ctts_data[index_entry_pos].count = 1;
+         sc->ctts_data[index_entry_pos].duration = ctts_duration;
+@@ -6568,6 +6604,12 @@ static int mov_read_close(AVFormatContext *s)
+         av_freep(&sc->spherical);
+         av_freep(&sc->mastering);
+         av_freep(&sc->coll);
++
++        for (j = 0; j < sc->tx3g_count; j++) {
++            av_freep(&(sc->tx3g_datas[j]->data));
++            av_freep(&(sc->tx3g_datas[j]));
++        }
++        av_freep(&sc->tx3g_datas);
+     }
+ 
+     if (mov->dv_demux) {
+diff --git a/libavformat/mp3dec.c b/libavformat/mp3dec.c
+index a76fe32..8f2f6c4 100644
+--- a/libavformat/mp3dec.c
++++ b/libavformat/mp3dec.c
+@@ -422,6 +422,99 @@ static int mp3_read_header(AVFormatContext *s)
+     return 0;
+ }
+ 
++static int resync(AVFormatContext *s, int64_t *start_pos) {
++#define MAX_READ_BYTES 1024
++    int64_t pos = *start_pos;
++    int valid = 0;
++    const size_t max_bytes_checked = 128 * 1024 * 3;
++    uint8_t buf[MAX_READ_BYTES];
++    ssize_t bytes_to_read = MAX_READ_BYTES;
++    ssize_t total_bytes_read = 0;
++    ssize_t remaining_bytes = 0;
++    int reach_eos = 0;
++    uint8_t *tmp = buf;
++    int64_t ret;
++    MPADecodeHeader mpa_header;
++    int i;
++
++    do {
++        if (pos >= (int64_t)(*start_pos + max_bytes_checked)) {
++            av_log(s, AV_LOG_WARNING, "giving up at offset:%lld", (long long)pos);
++            break;
++        }
++
++        if (remaining_bytes < 4) {
++            if (reach_eos) {
++                break;
++            } else {
++                memcpy(buf, tmp, remaining_bytes);
++                bytes_to_read = MAX_READ_BYTES - remaining_bytes;
++
++                ret = avio_seek(s->pb, pos + remaining_bytes, SEEK_SET);
++                if (ret < 0) {
++                    break;
++                }
++                total_bytes_read = avio_read(s->pb, buf + remaining_bytes, bytes_to_read);
++                if (total_bytes_read <= 0) {
++                    break;
++                }
++                reach_eos = (total_bytes_read != bytes_to_read);
++                total_bytes_read += remaining_bytes;
++                remaining_bytes = total_bytes_read;
++                tmp = buf;
++                continue;
++            }
++        }
++
++        uint32_t header = AV_RB32(tmp);
++        if (ff_mpa_check_header(header) < 0) {
++            ++pos;
++            ++tmp;
++            --remaining_bytes;
++            continue;
++        }
++
++        if (avpriv_mpegaudio_decode_header(&mpa_header, header) == 1) {
++            ++pos;
++            ++tmp;
++            --remaining_bytes;
++            continue;
++        }
++
++        av_log(s, AV_LOG_VERBOSE, "found possible 1st frame at %lld (header = 0x%08x)",
++                (long long)pos, header);
++
++        // verify next three mp3 frame
++        int64_t test_pos = pos + mpa_header.frame_size;
++
++        valid = 1;
++        for (i = 0; i < 3; i++) {
++            ret = check(s->pb, test_pos, NULL);
++            if (ret < 0) {
++                valid = 0;
++                break;
++            }
++
++            av_log(s, AV_LOG_VERBOSE, "found subsequent frame #%d at %lld",
++                    i + 2, (long long)test_pos);
++
++            test_pos += ret;
++        }
++
++        if (valid) {
++            *start_pos = pos;
++        } else {
++            av_log(s, AV_LOG_VERBOSE, "no dice, no valid sequence of frames found.");
++        }
++
++        ++pos;
++        ++tmp;
++        --remaining_bytes;
++    } while (!valid);
++
++    return valid;
++}
++
+ #define MP3_PACKET_SIZE 1024
+ 
+ static int mp3_read_packet(AVFormatContext *s, AVPacket *pkt)
+@@ -435,11 +528,44 @@ static int mp3_read_packet(AVFormatContext *s, AVPacket *pkt)
+     if(mp3->filesize > ID3v1_TAG_SIZE && pos < mp3->filesize)
+         size= FFMIN(size, mp3->filesize - pos);
+ 
+-    ret= av_get_packet(s->pb, pkt, size);
+-    if (ret <= 0) {
+-        if(ret<0)
+-            return ret;
+-        return AVERROR_EOF;
++    if (mp3->is_cbr) {
++        int frame_size;
++        for(;;) {
++            frame_size = check(s->pb, pos, NULL);
++            if (frame_size == CHECK_SEEK_FAILED) {
++                return AVERROR(EINVAL);
++            } else if (frame_size > 0) {
++                break;
++            } else if (frame_size == CHECK_WRONG_HEADER) {
++                av_log(s, AV_LOG_VERBOSE, "wrong header, need to resync");
++
++                //resync
++                int64_t tmp_pos = pos;
++                if (!resync(s, &tmp_pos)) {
++                    av_log(s, AV_LOG_ERROR, "Unable to resync. Signalling end of stream.");
++                    return AVERROR_EOF;
++                }
++                pos = tmp_pos;
++
++                // Try again with the new positon.
++            }
++        }
++        ret = avio_seek(s->pb, pos, SEEK_SET);
++        if (ret < 0)
++            return AVERROR(EINVAL);
++        ret = av_get_packet(s->pb, pkt, frame_size);
++        if (ret <= 0) {
++            if (ret < 0)
++                return ret;
++            return AVERROR_EOF;
++        }
++    } else {
++        ret= av_get_packet(s->pb, pkt, size);
++        if (ret <= 0) {
++            if(ret<0)
++                return ret;
++            return AVERROR_EOF;
++        }
+     }
+ 
+     pkt->flags &= ~AV_PKT_FLAG_CORRUPT;
+diff --git a/libavformat/utils.c b/libavformat/utils.c
+index 4d0b56c..f683dcc 100644
+--- a/libavformat/utils.c
++++ b/libavformat/utils.c
+@@ -2017,6 +2017,65 @@ int av_add_index_entry(AVStream *st, int64_t pos, int64_t timestamp,
+                               timestamp, size, distance, flags);
+ }
+ 
++static int compare_increasing_time(const void *_a, const void *_b) {
++    const AVIndexEntry *a = (const AVIndexEntry *)_a;
++    const AVIndexEntry *b = (const AVIndexEntry *)_b;
++
++    if (a->pts < b->pts) {
++        return -1;
++    } else if (a->pts > b->pts) {
++        return 1;
++    }
++
++    return 0;
++}
++
++int64_t av_search_closest_presentation_timestamp(const AVIndexEntry *entries, int nb_entries,
++                             int64_t wanted_timestamp, int want_pts)
++{
++    AVIndexEntry *tmp_entries = NULL;
++    if (av_reallocp_array(&tmp_entries, nb_entries, sizeof(*tmp_entries)) < 0) {
++        return -1;
++    }
++
++    memcpy(tmp_entries, entries, nb_entries * sizeof(AVIndexEntry));
++
++    qsort(tmp_entries, nb_entries, sizeof(AVIndexEntry), compare_increasing_time);
++
++    int64_t closest_timestamp = 0;
++
++    int left = 0;
++    int right_plus_one = nb_entries;
++    while (left < right_plus_one) {
++        int center = left + (right_plus_one - left) / 2;
++        int64_t center_time = tmp_entries[center].pts;
++        if (wanted_timestamp < center_time) {
++            right_plus_one = center;
++        } else if (wanted_timestamp > center_time) {
++            left = center + 1;
++        } else {
++            closest_timestamp = want_pts ? tmp_entries[center].pts
++                                         : tmp_entries[center].timestamp;
++            av_freep(&tmp_entries);
++            return closest_timestamp;
++        }
++    }
++
++    int index_tmp = left;
++
++    if (index_tmp > 0) {
++        if (llabs(tmp_entries[index_tmp].pts - wanted_timestamp) >
++            llabs(wanted_timestamp - tmp_entries[index_tmp - 1].pts)) {
++            --index_tmp;
++        }
++    }
++
++    closest_timestamp = want_pts ? tmp_entries[index_tmp].pts
++                                 : tmp_entries[index_tmp].timestamp;
++    av_freep(&tmp_entries);
++    return closest_timestamp;
++}
++
+ int ff_index_search_timestamp(const AVIndexEntry *entries, int nb_entries,
+                               int64_t wanted_timestamp, int flags)
+ {
